@@ -26,7 +26,15 @@
 #include <linux/major.h>
 #include <linux/device.h>
 #include <linux/cdev.h>
+#include <linux/wakelock.h>
 #include "input-compat.h"
+
+enum evdev_clock_type {
+	EV_CLK_REAL = 0,
+	EV_CLK_MONO,
+	EV_CLK_BOOT,
+	EV_CLK_MAX
+};
 
 struct evdev {
 	int open;
@@ -46,10 +54,13 @@ struct evdev_client {
 	unsigned int tail;
 	unsigned int packet_head; /* [future] position of the first element of next packet */
 	spinlock_t buffer_lock; /* protects access to buffer, head and tail */
+	struct wake_lock wake_lock;
+	bool use_wake_lock;
+	char name[28];
 	struct fasync_struct *fasync;
 	struct evdev *evdev;
 	struct list_head node;
-	int clkid;
+	unsigned int clk_type;
 	bool revoked;
 	unsigned int bufsize;
 	struct input_event buffer[];
@@ -101,22 +112,21 @@ static void __evdev_flush_queue(struct evdev_client *client, unsigned int type)
 	client->head = head;
 }
 
-/* queue SYN_DROPPED event */
-static void evdev_queue_syn_dropped(struct evdev_client *client)
+static void __evdev_queue_syn_dropped(struct evdev_client *client)
 {
-	unsigned long flags;
 	struct input_event ev;
 	ktime_t time;
 
-	time = (client->clkid == CLOCK_MONOTONIC) ?
-		ktime_get() : ktime_get_real();
+	time = client->clk_type == EV_CLK_REAL ?
+			ktime_get_real() :
+			client->clk_type == EV_CLK_MONO ?
+				ktime_get() :
+				ktime_get_boottime();
 
 	ev.time = ktime_to_timeval(time);
 	ev.type = EV_SYN;
 	ev.code = SYN_DROPPED;
 	ev.value = 0;
-
-	spin_lock_irqsave(&client->buffer_lock, flags);
 
 	client->buffer[client->head++] = ev;
 	client->head &= client->bufsize - 1;
@@ -126,8 +136,55 @@ static void evdev_queue_syn_dropped(struct evdev_client *client)
 		client->tail = (client->head - 1) & (client->bufsize - 1);
 		client->packet_head = client->tail;
 	}
+}
 
+static void evdev_queue_syn_dropped(struct evdev_client *client)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&client->buffer_lock, flags);
+	__evdev_queue_syn_dropped(client);
 	spin_unlock_irqrestore(&client->buffer_lock, flags);
+}
+
+static int evdev_set_clk_type(struct evdev_client *client, unsigned int clkid)
+{
+	unsigned long flags;
+	unsigned int clk_type;
+
+	switch (clkid) {
+
+	case CLOCK_REALTIME:
+		clk_type = EV_CLK_REAL;
+		break;
+	case CLOCK_MONOTONIC:
+		clk_type = EV_CLK_MONO;
+		break;
+	case CLOCK_BOOTTIME:
+		clk_type = EV_CLK_BOOT;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (client->clk_type != clk_type) {
+		client->clk_type = clk_type;
+
+		/*
+		 * Flush pending events and queue SYN_DROPPED event,
+		 * but only if the queue is not empty.
+		 */
+		spin_lock_irqsave(&client->buffer_lock, flags);
+
+		if (client->head != client->tail) {
+			client->packet_head = client->head = client->tail;
+			__evdev_queue_syn_dropped(client);
+		}
+
+		spin_unlock_irqrestore(&client->buffer_lock, flags);
+	}
+
+	return 0;
 }
 
 static void __pass_event(struct evdev_client *client,
@@ -149,17 +206,21 @@ static void __pass_event(struct evdev_client *client,
 		client->buffer[client->tail].value = 0;
 
 		client->packet_head = client->tail;
+		if (client->use_wake_lock)
+			wake_unlock(&client->wake_lock);
 	}
 
 	if (event->type == EV_SYN && event->code == SYN_REPORT) {
 		client->packet_head = client->head;
+		if (client->use_wake_lock)
+			wake_lock(&client->wake_lock);
 		kill_fasync(&client->fasync, SIGIO, POLL_IN);
 	}
 }
 
 static void evdev_pass_values(struct evdev_client *client,
 			const struct input_value *vals, unsigned int count,
-			ktime_t mono, ktime_t real)
+			ktime_t *ev_time)
 {
 	struct evdev *evdev = client->evdev;
 	const struct input_value *v;
@@ -169,8 +230,7 @@ static void evdev_pass_values(struct evdev_client *client,
 	if (client->revoked)
 		return;
 
-	event.time = ktime_to_timeval(client->clkid == CLOCK_MONOTONIC ?
-				      mono : real);
+	event.time = ktime_to_timeval(ev_time[client->clk_type]);
 
 	/* Interrupts are disabled, just acquire the lock. */
 	spin_lock(&client->buffer_lock);
@@ -182,6 +242,11 @@ static void evdev_pass_values(struct evdev_client *client,
 		__pass_event(client, &event);
 		if (v->type == EV_SYN && v->code == SYN_REPORT)
 			wakeup = true;
+#ifdef CONFIG_USB_HMT_SAMSUNG_INPUT
+		if (v->type== EV_KEY && v->code >= KEY_HMT_CMD_START)
+			pr_info("%s type:KEY code:0x%x value:%x\n", __func__,
+					v->code, v->value);
+#endif
 	}
 
 	spin_unlock(&client->buffer_lock);
@@ -198,21 +263,22 @@ static void evdev_events(struct input_handle *handle,
 {
 	struct evdev *evdev = handle->private;
 	struct evdev_client *client;
-	ktime_t time_mono, time_real;
+	ktime_t ev_time[EV_CLK_MAX];
 
-	time_mono = ktime_get();
-	time_real = ktime_mono_to_real(time_mono);
+	ev_time[EV_CLK_MONO] = ktime_get();
+	ev_time[EV_CLK_REAL] = ktime_mono_to_real(ev_time[EV_CLK_MONO]);
+	ev_time[EV_CLK_BOOT] = ktime_mono_to_any(ev_time[EV_CLK_MONO],
+						 TK_OFFS_BOOT);
 
 	rcu_read_lock();
 
 	client = rcu_dereference(evdev->grab);
 
 	if (client)
-		evdev_pass_values(client, vals, count, time_mono, time_real);
+		evdev_pass_values(client, vals, count, ev_time);
 	else
 		list_for_each_entry_rcu(client, &evdev->client_list, node)
-			evdev_pass_values(client, vals, count,
-					  time_mono, time_real);
+			evdev_pass_values(client, vals, count, ev_time);
 
 	rcu_read_unlock();
 }
@@ -366,6 +432,9 @@ static int evdev_release(struct inode *inode, struct file *file)
 
 	evdev_detach_client(evdev, client);
 
+	if (client->use_wake_lock)
+		wake_lock_destroy(&client->wake_lock);
+
 	if (is_vmalloc_addr(client))
 		vfree(client);
 	else
@@ -402,6 +471,8 @@ static int evdev_open(struct inode *inode, struct file *file)
 
 	client->bufsize = bufsize;
 	spin_lock_init(&client->buffer_lock);
+	snprintf(client->name, sizeof(client->name), "%s-%d",
+			dev_name(&evdev->dev), task_tgid_vnr(current));
 	client->evdev = evdev;
 	evdev_attach_client(evdev, client);
 
@@ -468,6 +539,9 @@ static int evdev_fetch_next_event(struct evdev_client *client,
 	if (have_event) {
 		*event = client->buffer[client->tail++];
 		client->tail &= client->bufsize - 1;
+		if (client->use_wake_lock &&
+		    client->packet_head == client->tail)
+			wake_unlock(&client->wake_lock);
 	}
 
 	spin_unlock_irq(&client->buffer_lock);
@@ -790,6 +864,11 @@ static int evdev_handle_mt_request(struct input_dev *dev,
 	return 0;
 }
 
+/*
+ * HACK: disable conflicting EVIOCREVOKE until Android userspace stops using
+ * EVIOCSSUSPENDBLOCK
+ */
+/*
 static int evdev_revoke(struct evdev *evdev, struct evdev_client *client,
 			struct file *file)
 {
@@ -797,6 +876,36 @@ static int evdev_revoke(struct evdev *evdev, struct evdev_client *client,
 	evdev_ungrab(evdev, client);
 	input_flush_device(&evdev->handle, file);
 	wake_up_interruptible(&evdev->wait);
+
+	return 0;
+}
+*/
+
+static int evdev_enable_suspend_block(struct evdev *evdev,
+				      struct evdev_client *client)
+{
+	if (client->use_wake_lock)
+		return 0;
+
+	spin_lock_irq(&client->buffer_lock);
+	wake_lock_init(&client->wake_lock, WAKE_LOCK_SUSPEND, client->name);
+	client->use_wake_lock = true;
+	if (client->packet_head != client->tail)
+		wake_lock(&client->wake_lock);
+	spin_unlock_irq(&client->buffer_lock);
+	return 0;
+}
+
+static int evdev_disable_suspend_block(struct evdev *evdev,
+				       struct evdev_client *client)
+{
+	if (!client->use_wake_lock)
+		return 0;
+
+	spin_lock_irq(&client->buffer_lock);
+	client->use_wake_lock = false;
+	spin_unlock_irq(&client->buffer_lock);
+	wake_lock_destroy(&client->wake_lock);
 
 	return 0;
 }
@@ -863,19 +972,22 @@ static long evdev_do_ioctl(struct file *file, unsigned int cmd,
 		else
 			return evdev_ungrab(evdev, client);
 
+	/*
+	 * HACK: disable conflicting EVIOCREVOKE until Android userspace stops
+	 * using EVIOCSSUSPENDBLOCK
+	 */
+	/*
 	case EVIOCREVOKE:
 		if (p)
 			return -EINVAL;
 		else
 			return evdev_revoke(evdev, client, file);
-
+	*/
 	case EVIOCSCLOCKID:
 		if (copy_from_user(&i, p, sizeof(unsigned int)))
 			return -EFAULT;
-		if (i != CLOCK_MONOTONIC && i != CLOCK_REALTIME)
-			return -EINVAL;
-		client->clkid = i;
-		return 0;
+
+		return evdev_set_clk_type(client, i);
 
 	case EVIOCGKEYCODE:
 		return evdev_handle_get_keycode(dev, p);
@@ -888,6 +1000,15 @@ static long evdev_do_ioctl(struct file *file, unsigned int cmd,
 
 	case EVIOCSKEYCODE_V2:
 		return evdev_handle_set_keycode_v2(dev, p);
+
+	case EVIOCGSUSPENDBLOCK:
+		return put_user(client->use_wake_lock, ip);
+
+	case EVIOCSSUSPENDBLOCK:
+		if (p)
+			return evdev_enable_suspend_block(evdev, client);
+		else
+			return evdev_disable_suspend_block(evdev, client);
 	}
 
 	size = _IOC_SIZE(cmd);

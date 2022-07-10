@@ -1444,10 +1444,16 @@ static int fanout_add(struct sock *sk, u16 id, u16 type_flags)
 		return -EINVAL;
 	}
 
-	if (po->fanout)
-		return -EALREADY;
-
 	mutex_lock(&fanout_mutex);
+
+	err = -EINVAL;
+	if (!po->running)
+		goto out;
+
+	err = -EALREADY;
+	if (po->fanout)
+		goto out;
+
 	match = NULL;
 	list_for_each_entry(f, &fanout_list, list) {
 		if (f->id == id &&
@@ -1513,17 +1519,16 @@ static void fanout_release(struct sock *sk)
 	struct packet_sock *po = pkt_sk(sk);
 	struct packet_fanout *f;
 
-	f = po->fanout;
-	if (!f)
-		return;
-
 	mutex_lock(&fanout_mutex);
-	po->fanout = NULL;
+	f = po->fanout;
+	if (f) {
+		po->fanout = NULL;
 
-	if (atomic_dec_and_test(&f->sk_ref)) {
-		list_del(&f->list);
-		dev_remove_pack(&f->prot_hook);
-		kfree(f);
+		if (atomic_dec_and_test(&f->sk_ref)) {
+			list_del(&f->list);
+			dev_remove_pack(&f->prot_hook);
+			kfree(f);
+		}
 	}
 	mutex_unlock(&fanout_mutex);
 }
@@ -1882,7 +1887,8 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 	int skb_len = skb->len;
 	unsigned int snaplen, res;
 	unsigned long status = TP_STATUS_USER;
-	unsigned short macoff, netoff, hdrlen;
+	unsigned short macoff, hdrlen;
+	unsigned int netoff;
 	struct sk_buff *copy_skb = NULL;
 	struct timespec ts;
 	__u32 ts_status;
@@ -1932,6 +1938,12 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 				       (maclen < 16 ? 16 : maclen)) +
 			po->tp_reserve;
 		macoff = netoff - maclen;
+	}
+	if (netoff > USHRT_MAX) {
+		spin_lock(&sk->sk_receive_queue.lock);
+		po->stats.stats1.tp_drops++;
+		spin_unlock(&sk->sk_receive_queue.lock);
+		goto drop_n_restore;
 	}
 	if (po->tp_version <= TPACKET_V2) {
 		if (macoff + snaplen > po->rx_ring.frame_size) {
@@ -2734,10 +2746,8 @@ static int packet_do_bind(struct sock *sk, const char *name, int ifindex,
 								 dev->ifindex);
 		}
 
-		BUG_ON(po->running);
 		po->num = proto;
 		po->prot_hook.type = proto;
-
 		if (unlikely(unlisted)) {
 			dev_put(dev);
 			po->prot_hook.dev = NULL;

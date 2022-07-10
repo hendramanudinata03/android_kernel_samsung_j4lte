@@ -54,6 +54,8 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 
 #define MAX_TCP_HEADER	(128 + MAX_HEADER)
 #define MAX_TCP_OPTION_SPACE 40
+#define TCP_MIN_SND_MSS		48
+#define TCP_MIN_GSO_SIZE	(TCP_MIN_SND_MSS - MAX_TCP_OPTION_SPACE)
 
 /* 
  * Never offer a window over 32767 without using window scaling. Some
@@ -88,7 +90,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 				 * to ~3sec-8min depending on RTO.
 				 */
 
-#define TCP_RETR2	15	/*
+#define TCP_RETR2	8	/*
 				 * This should take at least
 				 * 90 minutes to time out.
 				 * RFC1122 says that the limit is 100 sec.
@@ -276,6 +278,7 @@ extern int sysctl_tcp_challenge_ack_limit;
 extern unsigned int sysctl_tcp_notsent_lowat;
 extern int sysctl_tcp_min_tso_segs;
 extern int sysctl_tcp_autocorking;
+extern int sysctl_tcp_default_init_rwnd;
 
 extern atomic_long_t tcp_memory_allocated;
 extern struct percpu_counter tcp_sockets_allocated;
@@ -1086,6 +1089,8 @@ void tcp_set_state(struct sock *sk, int state);
 
 void tcp_done(struct sock *sk);
 
+int tcp_abort(struct sock *sk, int err);
+
 static inline void tcp_sack_reset(struct tcp_options_received *rx_opt)
 {
 	rx_opt->dsack = 0;
@@ -1370,6 +1375,8 @@ struct tcp_fastopen_context {
 	struct rcu_head		rcu;
 };
 
+static inline void tcp_init_send_head(struct sock *sk);
+
 /* write queue abstraction */
 static inline void tcp_write_queue_purge(struct sock *sk)
 {
@@ -1377,6 +1384,7 @@ static inline void tcp_write_queue_purge(struct sock *sk)
 
 	while ((skb = __skb_dequeue(&sk->sk_write_queue)) != NULL)
 		sk_wmem_free_skb(sk, skb);
+	tcp_init_send_head(sk);
 	sk_mem_reclaim(sk);
 	tcp_clear_all_retrans_hints(tcp_sk(sk));
 	inet_csk(sk)->icsk_backoff = 0;

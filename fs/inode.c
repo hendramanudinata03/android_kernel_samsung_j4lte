@@ -18,6 +18,7 @@
 #include <linux/buffer_head.h> /* for inode_has_buffers */
 #include <linux/ratelimit.h>
 #include <linux/list_lru.h>
+#include <trace/events/writeback.h>
 #include "internal.h"
 
 /*
@@ -30,7 +31,7 @@
  * inode_sb_list_lock protects:
  *   sb->s_inodes, inode->i_sb_list
  * bdi->wb.list_lock protects:
- *   bdi->wb.b_{dirty,io,more_io}, inode->i_wb_list
+ *   bdi->wb.b_{dirty,io,more_io,dirty_time}, inode->i_wb_list
  * inode_hash_lock protects:
  *   inode_hashtable, inode->i_hash
  *
@@ -131,6 +132,7 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	inode->i_sb = sb;
 	inode->i_blkbits = sb->s_blocksize_bits;
 	inode->i_flags = 0;
+	atomic64_set(&inode->i_sequence, 0);
 	atomic_set(&inode->i_count, 1);
 	inode->i_op = &empty_iops;
 	inode->i_fop = &empty_fops;
@@ -170,6 +172,23 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	mapping->private_data = NULL;
 	mapping->backing_dev_info = &default_backing_dev_info;
 	mapping->writeback_index = 0;
+#if defined(CONFIG_FMP_ECRYPT_FS)
+	mapping->iv = NULL;
+	memset(mapping->key, 0, KEY_MAX_SIZE);
+	mapping->key_length = 0;
+	mapping->alg = NULL;
+	mapping->sensitive_data_index = 0;
+	mapping->hash_tfm = NULL;
+#ifdef CONFIG_CRYPTO_FIPS
+	mapping->cc_enable = 0;
+#endif
+	mapping->private_enc_mode = 0;
+	mapping->private_algo_mode = 0;
+	mapping->plain_text = 0;
+#endif
+#ifdef CONFIG_SDP
+	mapping->userid = 0;
+#endif
 
 	/*
 	 * If the block_device provides a backing_dev_info for client
@@ -414,7 +433,8 @@ static void inode_lru_list_add(struct inode *inode)
  */
 void inode_add_lru(struct inode *inode)
 {
-	if (!(inode->i_state & (I_DIRTY | I_SYNC | I_FREEING | I_WILL_FREE)) &&
+	if (!(inode->i_state & (I_DIRTY_ALL | I_SYNC |
+				I_FREEING | I_WILL_FREE)) &&
 	    !atomic_read(&inode->i_count) && inode->i_sb->s_flags & MS_ACTIVE)
 		inode_lru_list_add(inode);
 }
@@ -621,6 +641,7 @@ void evict_inodes(struct super_block *sb)
 
 	dispose_list(&dispose);
 }
+EXPORT_SYMBOL_GPL(evict_inodes);
 
 /**
  * invalidate_inodes	- attempt to free all inodes on a superblock
@@ -645,7 +666,7 @@ int invalidate_inodes(struct super_block *sb, bool kill_dirty)
 			spin_unlock(&inode->i_lock);
 			continue;
 		}
-		if (inode->i_state & I_DIRTY && !kill_dirty) {
+		if (inode->i_state & I_DIRTY_ALL && !kill_dirty) {
 			spin_unlock(&inode->i_lock);
 			busy = 1;
 			continue;
@@ -1395,7 +1416,11 @@ static void iput_final(struct inode *inode)
 	else
 		drop = generic_drop_inode(inode);
 
+#if defined(CONFIG_FMP_ECRYPT_FS)
+	if (!drop && (sb->s_flags & MS_ACTIVE) && !inode->i_mapping->private_enc_mode) {
+#else
 	if (!drop && (sb->s_flags & MS_ACTIVE)) {
+#endif
 		inode->i_state |= I_REFERENCED;
 		inode_add_lru(inode);
 		spin_unlock(&inode->i_lock);
@@ -1430,11 +1455,20 @@ static void iput_final(struct inode *inode)
  */
 void iput(struct inode *inode)
 {
-	if (inode) {
-		BUG_ON(inode->i_state & I_CLEAR);
-
-		if (atomic_dec_and_lock(&inode->i_count, &inode->i_lock))
-			iput_final(inode);
+	if (!inode)
+		return;
+	BUG_ON(inode->i_state & I_CLEAR);
+retry:
+	if (atomic_dec_and_lock(&inode->i_count, &inode->i_lock)) {
+		if (inode->i_nlink && (inode->i_state & I_DIRTY_TIME)) {
+			atomic_inc(&inode->i_count);
+			inode->i_state &= ~I_DIRTY_TIME;
+			spin_unlock(&inode->i_lock);
+			trace_writeback_lazytime_iput(inode);
+			mark_inode_dirty_sync(inode);
+			goto retry;
+		}
+		iput_final(inode);
 	}
 }
 EXPORT_SYMBOL(iput);
@@ -1493,14 +1527,9 @@ static int relatime_need_update(struct vfsmount *mnt, struct inode *inode,
 	return 0;
 }
 
-/*
- * This does the actual work of updating an inodes time or version.  Must have
- * had called mnt_want_write() before calling this.
- */
-static int update_time(struct inode *inode, struct timespec *time, int flags)
+int generic_update_time(struct inode *inode, struct timespec *time, int flags)
 {
-	if (inode->i_op->update_time)
-		return inode->i_op->update_time(inode, time, flags);
+	int iflags = I_DIRTY_TIME;
 
 	if (flags & S_ATIME)
 		inode->i_atime = *time;
@@ -1510,8 +1539,26 @@ static int update_time(struct inode *inode, struct timespec *time, int flags)
 		inode->i_ctime = *time;
 	if (flags & S_MTIME)
 		inode->i_mtime = *time;
-	mark_inode_dirty_sync(inode);
+
+	if (!(inode->i_sb->s_flags & MS_LAZYTIME) || (flags & S_VERSION))
+		iflags |= I_DIRTY_SYNC;
+	__mark_inode_dirty(inode, iflags);
 	return 0;
+}
+EXPORT_SYMBOL(generic_update_time);
+
+/*
+ * This does the actual work of updating an inodes time or version.  Must have
+ * had called mnt_want_write() before calling this.
+ */
+static int update_time(struct inode *inode, struct timespec *time, int flags)
+{
+	int (*update_time)(struct inode *, struct timespec *, int);
+
+	update_time = inode->i_op->update_time ? inode->i_op->update_time :
+		generic_update_time;
+
+	return update_time(inode, time, flags);
 }
 
 /**
@@ -1598,7 +1645,7 @@ int should_remove_suid(struct dentry *dentry)
 }
 EXPORT_SYMBOL(should_remove_suid);
 
-static int __remove_suid(struct dentry *dentry, int kill)
+static int __remove_suid(struct vfsmount *mnt, struct dentry *dentry, int kill)
 {
 	struct iattr newattrs;
 
@@ -1607,7 +1654,7 @@ static int __remove_suid(struct dentry *dentry, int kill)
 	 * Note we call this on write, so notify_change will not
 	 * encounter any conflicting delegations:
 	 */
-	return notify_change(dentry, &newattrs, NULL);
+	return notify_change2(mnt, dentry, &newattrs, NULL);
 }
 
 int file_remove_suid(struct file *file)
@@ -1618,8 +1665,13 @@ int file_remove_suid(struct file *file)
 	int killpriv;
 	int error = 0;
 
-	/* Fast path for nothing security related */
-	if (IS_NOSEC(inode))
+	/*
+	 * Fast path for nothing security related.
+	 * As well for non-regular files, e.g. blkdev inodes.
+	 * For example, blkdev_write_iter() might get here
+	 * trying to remove privs which it is not allowed to.
+	 */
+	if (IS_NOSEC(inode) || !S_ISREG(inode->i_mode))
 		return 0;
 
 	killsuid = should_remove_suid(dentry);
@@ -1630,7 +1682,7 @@ int file_remove_suid(struct file *file)
 	if (killpriv)
 		error = security_inode_killpriv(dentry);
 	if (!error && killsuid)
-		error = __remove_suid(dentry, killsuid);
+		error = __remove_suid(file->f_path.mnt, dentry, killsuid);
 	if (!error)
 		inode_has_no_xattr(inode);
 
@@ -1656,6 +1708,7 @@ int file_update_time(struct file *file)
 	struct inode *inode = file_inode(file);
 	struct timespec now;
 	int sync_it = 0;
+	int need_sync = 0;
 	int ret;
 
 	/* First try to exhaust all avenues to not sync */
@@ -1669,7 +1722,19 @@ int file_update_time(struct file *file)
 	if (!timespec_equal(&inode->i_ctime, &now))
 		sync_it |= S_CTIME;
 
-	if (IS_I_VERSION(inode))
+	/* iversion impacts on "write" performance. This code just filter inodes
+	 * by presence in integrity cache (S_IMA flag, security/integrity/iint.c).
+	 * Because only FIVE uses iversion in Samsung Kernel this patch shouldn't
+	 * affect other code.
+	 * NOTICE: iversion code has been optimized in v4.17-rc4. So this patch should be
+	 * removed since v4.17-rc4
+	 */
+	#ifdef CONFIG_FIVE
+	need_sync = IS_I_VERSION(inode) && (inode->i_flags & S_IMA);
+	#else
+	need_sync = IS_I_VERSION(inode);
+	#endif
+	if (need_sync)
 		sync_it |= S_VERSION;
 
 	if (!sync_it)
@@ -1826,8 +1891,8 @@ void inode_init_owner(struct inode *inode, const struct inode *dir,
 		if (S_ISDIR(mode))
 			mode |= S_ISGID;
 		else if ((mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP) &&
-			 !in_group_p(inode->i_gid) &&
-			 !capable_wrt_inode_uidgid(dir, CAP_FSETID))
+			!in_group_p(inode->i_gid) &&
+			!capable_wrt_inode_uidgid(dir, CAP_FSETID))
 			mode &= ~S_ISGID;
 	} else
 		inode->i_gid = current_fsgid();
@@ -1933,3 +1998,9 @@ void inode_set_flags(struct inode *inode, unsigned int flags,
 				  new_flags) != old_flags));
 }
 EXPORT_SYMBOL(inode_set_flags);
+
+void inode_nohighmem(struct inode *inode)
+{
+	mapping_set_gfp_mask(inode->i_mapping, GFP_USER);
+}
+EXPORT_SYMBOL(inode_nohighmem);

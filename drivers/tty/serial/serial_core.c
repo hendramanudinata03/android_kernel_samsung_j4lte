@@ -95,6 +95,9 @@ static void __uart_start(struct tty_struct *tty)
 	struct uart_state *state = tty->driver_data;
 	struct uart_port *port = state->uart_port;
 
+	if (port->ops->wake_peer)
+		port->ops->wake_peer(port);
+
 	if (!uart_tx_stopped(port))
 		port->ops->start_tx(port);
 }
@@ -1331,8 +1334,16 @@ static void uart_close(struct tty_struct *tty, struct file *filp)
 	struct uart_port *uport;
 	unsigned long flags;
 
-	if (!state)
+	if (!state) {
+		struct uart_driver *drv = tty->driver->driver_state;
+
+		state = drv->state + tty->index;
+		port = &state->port;
+		spin_lock_irq(&port->lock);
+		--port->count;
+		spin_unlock_irq(&port->lock);
 		return;
+	}
 
 	uport = state->uart_port;
 	port = &state->port;
@@ -1552,6 +1563,10 @@ static int uart_open(struct tty_struct *tty, struct file *filp)
 
 	pr_debug("uart_open(%d) called\n", line);
 
+	spin_lock_irq(&port->lock);
+	++port->count;
+	spin_unlock_irq(&port->lock);
+
 	/*
 	 * We take the semaphore here to guarantee that we won't be re-entered
 	 * while allocating the state structure, or while we request any IRQs
@@ -1564,17 +1579,11 @@ static int uart_open(struct tty_struct *tty, struct file *filp)
 		goto end;
 	}
 
-	port->count++;
 	if (!state->uart_port || state->uart_port->flags & UPF_DEAD) {
 		retval = -ENXIO;
-		goto err_dec_count;
+		goto err_unlock;
 	}
 
-	/*
-	 * Once we set tty->driver_data here, we are guaranteed that
-	 * uart_close() will decrement the driver module use count.
-	 * Any failures from here onwards should not touch the count.
-	 */
 	tty->driver_data = state;
 	state->uart_port->state = state;
 	state->port.low_latency =
@@ -1595,8 +1604,7 @@ static int uart_open(struct tty_struct *tty, struct file *filp)
 
 end:
 	return retval;
-err_dec_count:
-	port->count--;
+err_unlock:
 	mutex_unlock(&port->mutex);
 	goto end;
 }
