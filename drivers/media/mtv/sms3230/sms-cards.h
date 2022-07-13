@@ -22,7 +22,7 @@
 
 #include <linux/usb.h>
 #include "smscoreapi.h"
-#ifdef SMS_RC_SUPPORT_SUBSYS
+#ifdef SEC_SMS_RC_SUPPORT_SUBSYS
 #include "smsir.h"
 #endif
 

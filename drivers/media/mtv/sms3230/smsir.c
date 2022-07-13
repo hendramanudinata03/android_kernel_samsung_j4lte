@@ -32,7 +32,7 @@
 #include "smsir.h"
 #include "sms-cards.h"
 
-#ifdef SMS_RC_SUPPORT_SUBSYS
+#ifdef SEC_SMS_RC_SUPPORT_SUBSYS
 #define MODULE_NAME "smsmdtv"
 
 extern int sms_dbg;

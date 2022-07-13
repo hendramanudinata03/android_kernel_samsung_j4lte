@@ -35,7 +35,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <asm/page.h>
 
 #include "smspower.h"
-#ifdef SMS_RC_SUPPORT_SUBSYS
+#ifdef SEC_SMS_RC_SUPPORT_SUBSYS
 #include "smsir.h"
 #endif
 
@@ -1966,7 +1966,7 @@ void smscore_module_exit(void);
 
 
 
-#ifdef SMS_HOSTLIB_SUBSYS
+#ifdef SEC_SMS_HOSTLIB_SUBSYS
 extern int smschar_register(void);
 extern void smschar_unregister(void);
 #endif
@@ -1981,17 +1981,17 @@ extern int smsdvb_register(void);
 extern void smsdvb_unregister(void);
 #endif
 
-#ifdef SMS_USB_DRV
+#ifdef SEC_SMS_USB_DRV
 extern int smsusb_register(void);
 extern void smsusb_unregister(void);
 #endif
 
-#ifdef SMS_SDIO_DRV
+#ifdef SEC_SMS_SDIO_DRV
 extern int smssdio_register(void);
 extern void smssdio_unregister(void);
 #endif
 
-#ifdef SMS_SPI_DRV
+#ifdef SEC_SMS_SPI_DRV
 extern int smsspi_register(void);
 
 extern void smsspi_unregister(void);
@@ -2000,7 +2000,7 @@ extern int smsspi_plug_notify(int plugin);
 
 #endif
 
-#ifdef SMS_I2C_DRV
+#ifdef SEC_SMS_I2C_DRV
 extern int smsi2c_register(void);
 extern void smsi2c_unregister(void);
 #endif

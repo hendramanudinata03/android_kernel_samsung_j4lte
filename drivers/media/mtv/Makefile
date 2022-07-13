@@ -41,9 +41,9 @@ obj-$(CONFIG_MTV_MTV23x) += mtv23x/
 ###########
 
 # SMS3230
-ccflags-$(CONFIG_MTV_SMS3230) += -Idrivers/media/mtv/sms3230
-obj-$(CONFIG_MTV_SMS3230) += isdbt_port_sms3230.o
-obj-$(CONFIG_MTV_SMS3230) += sms3230/
+ccflags-$(CONFIG_SEC_MTV_SMS3230) += -Idrivers/media/mtv/sms3230
+obj-$(CONFIG_SEC_MTV_SMS3230) += isdbt_port_sms3230.o
+obj-$(CONFIG_SEC_MTV_SMS3230) += sms3230/
 
 ###########
 # I/F

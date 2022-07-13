@@ -38,7 +38,7 @@
 #include "smsendian.h"
 #include "smscoreapi.h"
 #include "sms-cards.h"
-#ifdef SMS_RC_SUPPORT_SUBSYS
+#ifdef SEC_SMS_RC_SUPPORT_SUBSYS
 #include "smsir.h"
 #endif
 #include "smsspicommon.h"
@@ -127,7 +127,7 @@ struct smscore_device_t {
 	u32 current_address;
 
 	/* Infrared (IR) */
-#ifdef SMS_RC_SUPPORT_SUBSYS
+#ifdef SEC_SMS_RC_SUPPORT_SUBSYS
 	struct ir_t ir;
 #endif
 	int led_state;
@@ -206,7 +206,7 @@ void smscore_flush_dcache(void * dev, unsigned long offset, unsigned int size)
 #endif
 
 #ifdef SMS_STATIC_COMMON_BUFFER
-#ifdef SMS_SPI_DRV
+#ifdef SEC_SMS_SPI_DRV
 #define MAX_BUF_SIZE RX_BUFFER_SIZE
 #define MAX_BUF_NUMBER NUM_RX_BUFFERS
 #else
@@ -216,7 +216,7 @@ void smscore_flush_dcache(void * dev, unsigned long offset, unsigned int size)
 
 #define COMMOM_SIZE (MAX_BUF_SIZE * MAX_BUF_NUMBER)
 static void *sms_static_combuf= NULL;
-#ifdef SMS_SPI_DRV
+#ifdef SEC_SMS_SPI_DRV
 static dma_addr_t sms_static_combuf_phys = 0;
 #endif
 
@@ -241,14 +241,14 @@ void *smscore_malloc_common_buffer(void)
 void smscore_free_common_buffer(void)
 {
 	if (sms_static_combuf) {
-#ifndef SMS_SPI_DRV
+#ifndef SEC_SMS_SPI_DRV
 		kfree(sms_static_combuf);
 #else
 		dma_free_coherent(NULL, PAGE_ALIGN(COMMOM_SIZE),
 				sms_static_combuf, sms_static_combuf_phys);
 #endif
 		sms_static_combuf = NULL;
-#ifdef SMS_SPI_DRV
+#ifdef SEC_SMS_SPI_DRV
 		sms_static_combuf_phys = 0;
 #endif
 	}
@@ -257,7 +257,7 @@ void smscore_free_common_buffer(void)
 static void *smscore_get_common_buffer(void *device, size_t size, gfp_t flags, int node, dma_addr_t *phys)
 {
 	BUG_ON((size > PAGE_ALIGN(COMMOM_SIZE)));
-#ifdef SMS_SPI_DRV
+#ifdef SEC_SMS_SPI_DRV
 	if (phys) {
 		*phys = sms_static_combuf_phys;
 	}
@@ -315,7 +315,7 @@ static void smscore_put_firmware_buffer(struct smscore_device_t *coredev, void *
 #endif
 }
 
-#ifdef SMS_HOSTLIB_SUBSYS
+#ifdef SEC_SMS_HOSTLIB_SUBSYS
 static powermode_t g_powermode_notify;
 #endif
 
@@ -713,7 +713,7 @@ static int smscore_sendrequest_wait_and_retry(void *dev, void *buffer, size_t si
 	return rc;
 }
 
-#ifdef SMS_RC_SUPPORT_SUBSYS
+#ifdef SEC_SMS_RC_SUPPORT_SUBSYS
 /**
  * Starts & enables IR operations
  *
@@ -865,9 +865,9 @@ int smscore_start_device(void* dev)
 	/*(MRC) will be ready*/
 	sms_debug("scheduling delayed callback to hotplugs time=%ums\n", jiffies_to_msecs(jiffies));
 	schedule_delayed_work(&coredev->work_queue, msecs_to_jiffies(100));
-#ifdef SMS_RC_SUPPORT_SUBSYS
+#ifdef SEC_SMS_RC_SUPPORT_SUBSYS
 	smscore_init_ir(coredev);
-#endif /*SMS_RC_SUPPORT_SUBSYS*/
+#endif /*SEC_SMS_RC_SUPPORT_SUBSYS*/
 
 	sms_info("device 0x%p started, rc %d", coredev, rc);
 
@@ -1386,10 +1386,10 @@ void smscore_unregister_device(void* dev)
 
 	cancel_delayed_work(&coredev->work_queue);
 	/* Release input device (IR) resources */
-#ifdef SMS_RC_SUPPORT_SUBSYS
+#ifdef SEC_SMS_RC_SUPPORT_SUBSYS
 	/* Release input device (IR) resources */
 	sms_ir_exit(&coredev->ir);
-#endif /*SMS_RC_SUPPORT_SUBSYS*/
+#endif /*SEC_SMS_RC_SUPPORT_SUBSYS*/
 	smscore_notify_clients(coredev);
 	smscore_notify_callbacks(coredev, NULL, 0);
 
@@ -2044,7 +2044,7 @@ void smscore_onresponse(void* dev, struct smscore_buffer_t *cb)
 			sms_err("MSG_SMS_MRC_MODE_CHANGE_RES");
 			complete(&coredev->mrc_change_mode_done);
 			break;
-#ifdef SMS_RC_SUPPORT_SUBSYS
+#ifdef SEC_SMS_RC_SUPPORT_SUBSYS
 		case MSG_SMS_START_IR_RES:
 			complete(&coredev->ir_init_done);
 			break;
@@ -2319,7 +2319,7 @@ int smsclient_sendrequest(struct smscore_client_t *client,
 }
 EXPORT_SYMBOL_GPL(smsclient_sendrequest);
 
-#ifdef SMS_HOSTLIB_SUBSYS
+#ifdef SEC_SMS_HOSTLIB_SUBSYS
 /**
  * return the size of large (common) buffer
  *
@@ -2710,30 +2710,30 @@ void sms_chip_plug(int id, int plugin)
 
 	if (plugin) {
 		//sms_chip_poweron(id);
-#ifdef SMS_SDIO_DRV
+#ifdef SEC_SMS_SDIO_DRV
 		sms_sdio_plug_notify(id, plugin);
 		msleep(50);
 #endif
 
-#ifdef SMS_SPI_DRV
+#ifdef SEC_SMS_SPI_DRV
 		smsspi_plug_notify(1);
 		//msleep(50);
 #endif
 
-#ifdef SMS_I2C_DRV
+#ifdef SEC_SMS_I2C_DRV
 		smsi2c_register();
 #endif
 
 	} else {
-#ifdef SMS_I2C_DRV
+#ifdef SEC_SMS_I2C_DRV
 		smsi2c_unregister();
 #endif
 
-#ifdef SMS_SDIO_DRV
+#ifdef SEC_SMS_SDIO_DRV
 		sms_sdio_plug_notify(id, plugin);
 		msleep(50);
 #endif
-#ifdef SMS_SPI_DRV
+#ifdef SEC_SMS_SPI_DRV
 		smsspi_plug_notify(0);
 		msleep(50);
 #endif
@@ -2773,14 +2773,14 @@ int smscore_module_init(void)
 	}
 #endif
 
-#ifdef SMS_HOSTLIB_SUBSYS
+#ifdef SEC_SMS_HOSTLIB_SUBSYS
 	g_powermode_notify = NULL;
 #endif
 	/*
 	 * second, register sub system adapter objects
 	 */
 
-#ifdef SMS_NET_SUBSYS
+#ifdef SEC_SMS_NET_SUBSYS
 	/* Network device register */
 	rc = smsnet_register();
 	sms_debug("smsnet_register, %d", rc);
@@ -2790,7 +2790,7 @@ int smscore_module_init(void)
 	}
 #endif
 
-#ifdef SMS_HOSTLIB_SUBSYS
+#ifdef SEC_SMS_HOSTLIB_SUBSYS
 	/* Char device register */
 	rc = smschar_register();
 	sms_debug("smschar registered, %d", rc);
@@ -2814,7 +2814,7 @@ int smscore_module_init(void)
 	 * third, register interfaces objects 
 	 */
 
-#ifdef SMS_USB_DRV
+#ifdef SEC_SMS_USB_DRV
 	/* USB Register */
 	rc = smsusb_register();
 	sms_debug("smsusb registered, %d", rc);
@@ -2824,7 +2824,7 @@ int smscore_module_init(void)
 	}
 #endif
 
-#ifdef SMS_SDIO_DRV
+#ifdef SEC_SMS_SDIO_DRV
 	/* SDIO Register */
 	rc = smssdio_register();
 	sms_debug("smssdio registered, %d", rc);
@@ -2870,12 +2870,12 @@ smsi2c_error:
 smsspi_error:
 #endif
 
-#ifdef SMS_SDIO_DRV
+#ifdef SEC_SMS_SDIO_DRV
 	smssdio_unregister();
 smssdio_error:
 #endif
 
-#ifdef SMS_USB_DRV
+#ifdef SEC_SMS_USB_DRV
 	smsusb_unregister();
 smsusb_error:
 #endif
@@ -2885,12 +2885,12 @@ smsusb_error:
 smsdvb_error:
 #endif
 
-#ifdef SMS_HOSTLIB_SUBSYS
+#ifdef SEC_SMS_HOSTLIB_SUBSYS
 	smschar_unregister();
 smschar_error:
 #endif
 
-#ifdef SMS_NET_SUBSYS
+#ifdef SEC_SMS_NET_SUBSYS
 	smsnet_unregister();
 smsnet_error:
 #endif
@@ -2923,22 +2923,22 @@ void smscore_module_exit(void)
 	 * first, unregister interfaces objects
 	 */
 
-#ifdef SMS_USB_DRV
+#ifdef SEC_SMS_USB_DRV
 	/* USB unregister */
 	smsusb_unregister();
 #endif
 
-#ifdef SMS_SDIO_DRV
+#ifdef SEC_SMS_SDIO_DRV
 	/* SDIO unregister */
 	smssdio_unregister();
 #endif
 
-#ifdef SMS_SPI_DRV
+#ifdef SEC_SMS_SPI_DRV
 	/* SPI unregister */
 	smsspi_unregister();
 #endif
 
-#if defined(SMS_I2C_DRV) && !defined(SMS_POWER_CTL)
+#if defined(SEC_SMS_I2C_DRV) && !defined(SMS_POWER_CTL)
 	smsi2c_unregister();
 #endif
 
@@ -2954,12 +2954,12 @@ void smscore_module_exit(void)
 	 * registerd interface.
 	 */
 
-#ifdef SMS_NET_SUBSYS
+#ifdef SEC_SMS_NET_SUBSYS
 	/* Network device unregister */
 	smsnet_unregister();
 #endif
 
-#ifdef SMS_HOSTLIB_SUBSYS
+#ifdef SEC_SMS_HOSTLIB_SUBSYS
 	/* Char device unregister */
 	smschar_unregister();
 #endif

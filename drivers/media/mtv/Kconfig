@@ -48,8 +48,8 @@ choice
 		bool "MTV222"
 	config MTV_MTV23x
 		bool "MTV23x"
-	config MTV_SMS3230
-		bool "SMS3230"
+	config SEC_MTV_SMS3230
+		bool "Samsung-modified SMS3230"
 endchoice
 
 config MTV_SPI
